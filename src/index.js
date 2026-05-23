@@ -63,7 +63,7 @@ async function getAccessToken(env) {
   const header = { alg: "RS256", typ: "JWT" };
   const claimSet = {
     iss: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-    scope: "https://www.googleapis.com/auth/spreadsheets.readonly",
+    scope: "https://www.googleapis.com/auth/spreadsheets",
     aud: "https://oauth2.googleapis.com/token",
     exp: now + 3600,
     iat: now,
@@ -116,6 +116,30 @@ async function getAccessToken(env) {
 
   const data = await response.json();
   return data.access_token;
+}
+
+async function appendLead(env, row) {
+  const token = await getAccessToken(env);
+  const range = encodeURIComponent("Leads!A:Z");
+
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${range}:append?valueInputOption=USER_ENTERED`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      values: [row],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+
+  return response.json();
 }
 
 function pemToArrayBuffer(pem) {
@@ -340,7 +364,54 @@ export default {
         return await handleQuote(request, env);
       }
 
+      if (url.pathname === "/lead" && request.method === "POST") {
+        const body = await request.json();
+        const geo = request.cf || {};
+
+        if (!body.gdpr_consent) {
+          return json({ ok: false, error: "GDPR consent required" }, 400);
+        }
+
+        if (!body.email || !body.name) {
+          return json({ ok: false, error: "Name and email are required" }, 400);
+        }
+
+        const row = [
+          new Date().toISOString(),
+          "new",
+          body.property_id || "",
+          body.check_in || "",
+          body.check_out || "",
+          body.nights || "",
+          body.guests || "",
+          body.currency || "EUR",
+          body.accommodation_total || "",
+          body.cleaning_fee || "",
+          body.taxe_de_sejour || "",
+          body.quoted_total || "",
+          body.name || "",
+          body.email || "",
+          body.phone || "",
+          body.message || "",
+          body.gdpr_consent ? "TRUE" : "FALSE",
+          geo.country || "",
+          geo.city || "",
+          geo.timezone || "",
+          body.source_url || "",
+          request.headers.get("user-agent") || "",
+        ];
+
+        await appendLead(env, row);
+
+        return json({
+          ok: true,
+          message: "Lead saved",
+        });
+      }
+
       return new Response("Not found", { status: 404 });
+
+
     } catch (err) {
       return json(
         {
