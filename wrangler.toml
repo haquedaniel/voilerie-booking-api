@@ -1,0 +1,4 @@
+name = "voilerie-booking-api"
+main = "./src/index.js"
+compatibility_date = "2026-05-23"
+workers_dev = true
