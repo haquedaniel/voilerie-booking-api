@@ -1,11 +1,44 @@
+function json(data, status = 200) {
+  return Response.json(data, {
+    status,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+}
+
+function parseDate(value) {
+  const d = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function nightsBetween(checkIn, checkOut) {
+  return Math.round((checkOut - checkIn) / (1000 * 60 * 60 * 24));
+}
+
+function overlaps(startA, endA, startB, endB) {
+  return startA < endB && endA > startB;
+}
+
+function toNumber(value, fallback = 0) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const cleaned = String(value).replace(",", ".").replace(/[^\d.-]/g, "");
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function settingsToObject(rows) {
+  const out = {};
+  for (const row of rows) {
+    if (row.key) out[row.key] = row.value;
+  }
+  return out;
+}
+
 async function getAccessToken(env) {
   const now = Math.floor(Date.now() / 1000);
 
-  const header = {
-    alg: "RS256",
-    typ: "JWT",
-  };
-
+  const header = { alg: "RS256", typ: "JWT" };
   const claimSet = {
     iss: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
     scope: "https://www.googleapis.com/auth/spreadsheets.readonly",
@@ -19,12 +52,11 @@ async function getAccessToken(env) {
   }
 
   const privateKey = env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n");
-
   const encoder = new TextEncoder();
 
   function base64url(obj) {
-    const json = JSON.stringify(obj);
-    const bytes = encoder.encode(json);
+    const jsonText = JSON.stringify(obj);
+    const bytes = encoder.encode(jsonText);
     return btoa(String.fromCharCode(...bytes))
       .replace(/\+/g, "-")
       .replace(/\//g, "_")
@@ -36,10 +68,7 @@ async function getAccessToken(env) {
   const key = await crypto.subtle.importKey(
     "pkcs8",
     pemToArrayBuffer(privateKey),
-    {
-      name: "RSASSA-PKCS1-v1_5",
-      hash: "SHA-256",
-    },
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
     false,
     ["sign"]
   );
@@ -50,23 +79,18 @@ async function getAccessToken(env) {
     encoder.encode(unsignedToken)
   );
 
-  const signedJwt =
-    unsignedToken + "." + arrayBufferToBase64Url(signature);
+  const signedJwt = `${unsignedToken}.${arrayBufferToBase64Url(signature)}`;
 
   const response = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
       assertion: signedJwt,
     }),
   });
 
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
+  if (!response.ok) throw new Error(await response.text());
 
   const data = await response.json();
   return data.access_token;
@@ -91,10 +115,7 @@ function pemToArrayBuffer(pem) {
 function arrayBufferToBase64Url(buffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
-
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
+  for (const byte of bytes) binary += String.fromCharCode(byte);
 
   return btoa(binary)
     .replace(/\+/g, "-")
@@ -104,19 +125,14 @@ function arrayBufferToBase64Url(buffer) {
 
 async function readSheet(env, tabName) {
   const token = await getAccessToken(env);
-
   const range = encodeURIComponent(`${tabName}!A:Z`);
   const url = `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${range}`;
 
   const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-    },
+    headers: { Authorization: `Bearer ${token}` },
   });
 
-  if (!response.ok) {
-    throw new Error(await response.text());
-  }
+  if (!response.ok) throw new Error(await response.text());
 
   const data = await response.json();
   const rows = data.values || [];
@@ -134,40 +150,172 @@ async function readSheet(env, tabName) {
   });
 }
 
+function findBlockingReservation(reservations, propertyId, checkIn, checkOut) {
+  return reservations.find((r) => {
+    const listing = String(r.Listing || r.listing || "").trim();
+    if (listing !== propertyId) return false;
+
+    const resCheckIn = parseDate(r["Check in Date"] || r.checkin_date);
+    const nights = toNumber(r["Number of Nights"] || r.nights, 0);
+    if (!resCheckIn || !nights) return false;
+
+    const resCheckOut = new Date(resCheckIn);
+    resCheckOut.setUTCDate(resCheckOut.getUTCDate() + nights);
+
+    return overlaps(checkIn, checkOut, resCheckIn, resCheckOut);
+  });
+}
+
+function findPricingRule(pricingRules, propertyId, checkIn, stayNights) {
+  return pricingRules.find((r) => {
+    const listing = String(r.property_id || r.listing || r.Listing || "").trim();
+    if (listing !== propertyId) return false;
+
+    const start = parseDate(r.start_date);
+    const end = parseDate(r.end_date);
+    if (!start || !end) return false;
+
+    const minNights = toNumber(r.min_nights, 1);
+
+    return checkIn >= start && checkIn <= end && stayNights >= minNights;
+  });
+}
+
+async function handleQuote(request, env) {
+  const url = new URL(request.url);
+
+  const propertyId = url.searchParams.get("property_id");
+  const checkInRaw = url.searchParams.get("check_in");
+  const checkOutRaw = url.searchParams.get("check_out");
+  const guests = toNumber(url.searchParams.get("guests"), 1);
+
+  if (!propertyId || !checkInRaw || !checkOutRaw) {
+    return json(
+      {
+        ok: false,
+        error: "Missing property_id, check_in or check_out",
+      },
+      400
+    );
+  }
+
+  const checkIn = parseDate(checkInRaw);
+  const checkOut = parseDate(checkOutRaw);
+
+  if (!checkIn || !checkOut || checkOut <= checkIn) {
+    return json({ ok: false, error: "Invalid dates" }, 400);
+  }
+
+  const stayNights = nightsBetween(checkIn, checkOut);
+
+  const [reservations, pricingRules, settingsRows] = await Promise.all([
+    readSheet(env, "Reservations"),
+    readSheet(env, "Pricing Rules"),
+    readSheet(env, "Widget Settings"),
+  ]);
+
+  const settings = settingsToObject(settingsRows);
+  const currency = settings.default_currency || "EUR";
+  const defaultMinNights = toNumber(settings.default_min_nights, 1);
+
+  const blocker = findBlockingReservation(
+    reservations,
+    propertyId,
+    checkIn,
+    checkOut
+  );
+
+  if (blocker) {
+    return json({
+      ok: true,
+      available: false,
+      reason: "occupied",
+      property_id: propertyId,
+      check_in: checkInRaw,
+      check_out: checkOutRaw,
+      nights: stayNights,
+    });
+  }
+
+  const rule = findPricingRule(pricingRules, propertyId, checkIn, stayNights);
+
+  if (!rule) {
+    return json({
+      ok: true,
+      available: false,
+      reason: "no_pricing_rule",
+      property_id: propertyId,
+      check_in: checkInRaw,
+      check_out: checkOutRaw,
+      nights: stayNights,
+    });
+  }
+
+  const nightlyPrice = toNumber(rule.nightly_price, 0);
+  const cleaningFee = toNumber(rule.cleaning_fee, 0);
+  const minNights = toNumber(rule.min_nights, defaultMinNights);
+
+  if (stayNights < minNights) {
+    return json({
+      ok: true,
+      available: false,
+      reason: "min_stay_not_met",
+      min_nights: minNights,
+      property_id: propertyId,
+      check_in: checkInRaw,
+      check_out: checkOutRaw,
+      nights: stayNights,
+    });
+  }
+
+  const accommodationTotal = nightlyPrice * stayNights;
+  const totalPrice = accommodationTotal + cleaningFee;
+
+  return json({
+    ok: true,
+    available: true,
+    property_id: propertyId,
+    check_in: checkInRaw,
+    check_out: checkOutRaw,
+    nights: stayNights,
+    guests,
+    currency,
+    nightly_price: nightlyPrice,
+    accommodation_total: accommodationTotal,
+    cleaning_fee: cleaningFee,
+    total_price: totalPrice,
+    pricing_rule: rule.rule_id || null,
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    if (url.pathname === "/quote") {
-      try {
-        const reservations = await readSheet(env, "Reservations");
-        const pricingRules = await readSheet(env, "Pricing Rules");
-        const settings = await readSheet(env, "Widget Settings");
-
-        return Response.json({
-          ok: true,
-          message: "Google Sheets connected",
-          property_id: url.searchParams.get("property_id"),
-          check_in: url.searchParams.get("check_in"),
-          check_out: url.searchParams.get("check_out"),
-          guests: url.searchParams.get("guests"),
-          rows: {
-            reservations: reservations.length,
-            pricing_rules: pricingRules.length,
-            widget_settings: settings.length,
-          },
-        });
-      } catch (err) {
-        return Response.json(
-          {
-            ok: false,
-            error: String(err.message || err),
-          },
-          { status: 500 }
-        );
-      }
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        },
+      });
     }
 
-    return new Response("Not found", { status: 404 });
+    try {
+      if (url.pathname === "/quote") {
+        return await handleQuote(request, env);
+      }
+
+      return new Response("Not found", { status: 404 });
+    } catch (err) {
+      return json(
+        {
+          ok: false,
+          error: String(err.message || err),
+        },
+        500
+      );
+    }
   },
 };
