@@ -14,6 +14,10 @@ async function getAccessToken(env) {
     iat: now,
   };
 
+  if (!env.GOOGLE_PRIVATE_KEY) {
+    throw new Error("Missing GOOGLE_PRIVATE_KEY secret");
+  }
+
   const privateKey = env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n");
 
   const encoder = new TextEncoder();
