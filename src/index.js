@@ -12,6 +12,28 @@ function parseDate(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+function parseSheetDate(value) {
+  if (!value) return null;
+
+  const text = String(value).trim();
+
+  // ISO / Google serialised date: 2026-05-23
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    return parseDate(text);
+  }
+
+  // French / European date: 23/05/2026
+  const match = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (match) {
+    const [, dd, mm, yyyy] = match;
+    return parseDate(`${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`);
+  }
+
+  // Last resort
+  const d = new Date(text);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function nightsBetween(checkIn, checkOut) {
   return Math.round((checkOut - checkIn) / (1000 * 60 * 60 * 24));
 }
@@ -155,7 +177,9 @@ function findBlockingReservation(reservations, propertyId, checkIn, checkOut) {
     const listing = String(r.Listing || r.listing || "").trim();
     if (listing !== propertyId) return false;
 
-    const resCheckIn = parseDate(r["Check in Date"] || r.checkin_date);
+    const resCheckIn = parseSheetDate(
+      r["Check in Date"] || r["Check-in Date"] || r.checkin_date
+    );    
     const nights = toNumber(r["Number of Nights"] || r.nights, 0);
     if (!resCheckIn || !nights) return false;
 
@@ -280,7 +304,8 @@ if (blocker) {
     ok: true,
     available: true,
     debug: {
-    matching_reservations: matchingReservations.length,
+      matching_reservations: matchingReservations.length,
+      sample_reservation: matchingReservations[0],
     },
     property_id: propertyId,
     check_in: checkInRaw,
