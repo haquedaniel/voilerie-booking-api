@@ -166,7 +166,7 @@ function findBlockingReservation(reservations, propertyId, checkIn, checkOut) {
   });
 }
 
-function findPricingRule(pricingRules, propertyId, checkIn, stayNights) {
+function findPricingRule(pricingRules, propertyId, checkIn) {
   return pricingRules.find((r) => {
     const listing = String(r.property_id || r.listing || r.Listing || "").trim();
     if (listing !== propertyId) return false;
@@ -175,9 +175,7 @@ function findPricingRule(pricingRules, propertyId, checkIn, stayNights) {
     const end = parseDate(r.end_date);
     if (!start || !end) return false;
 
-    const minNights = toNumber(r.min_nights, 1);
-
-    return checkIn >= start && checkIn <= end && stayNights >= minNights;
+    return checkIn >= start && checkIn <= end;
   });
 }
 
@@ -218,27 +216,34 @@ async function handleQuote(request, env) {
   const currency = settings.default_currency || "EUR";
   const defaultMinNights = toNumber(settings.default_min_nights, 1);
 
-  const blocker = findBlockingReservation(
-    reservations,
-    propertyId,
-    checkIn,
-    checkOut
-  );
+  const matchingReservations = reservations.filter((r) =>
+  String(r.Listing || r.listing || "").trim() === propertyId
+);
 
-  if (blocker) {
-    return json({
-      ok: true,
-      available: false,
-      reason: "occupied",
-      property_id: propertyId,
-      check_in: checkInRaw,
-      check_out: checkOutRaw,
-      nights: stayNights,
-    });
-  }
+const blocker = findBlockingReservation(
+  reservations,
+  propertyId,
+  checkIn,
+  checkOut
+);
 
-  const rule = findPricingRule(pricingRules, propertyId, checkIn, stayNights);
+if (blocker) {
+  return json({
+    ok: true,
+    available: false,
+    reason: "occupied",
+    property_id: propertyId,
+    check_in: checkInRaw,
+    check_out: checkOutRaw,
+    nights: stayNights,
+    debug: {
+      matching_reservations: matchingReservations.length,
+      blocker,
+    },
+  });
+}
 
+  const rule = findPricingRule(pricingRules, propertyId, checkIn);
   if (!rule) {
     return json({
       ok: true,
@@ -274,6 +279,9 @@ async function handleQuote(request, env) {
   return json({
     ok: true,
     available: true,
+    debug: {
+    matching_reservations: matchingReservations.length,
+    },
     property_id: propertyId,
     check_in: checkInRaw,
     check_out: checkOutRaw,
