@@ -305,7 +305,7 @@ if (blocker) {
     available: true,
     debug: {
       matching_reservations: matchingReservations.length,
-      sample_reservation: matchingReservations[0],
+      //sample_reservation: matchingReservations[0],
     },
     property_id: propertyId,
     check_in: checkInRaw,
